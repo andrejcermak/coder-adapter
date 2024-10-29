@@ -5,6 +5,7 @@ require "json"
 # with the Kuberenetes APIs.
 class OodCore::Job::Adapters::Coder::Batch
   require_relative "coder_job_info"
+  class Error < StandardError; end
   def initialize(config)
     #raise JobAdapterError, config
     @host = config[:host]
@@ -14,21 +15,23 @@ class OodCore::Job::Adapters::Coder::Batch
     # Mocked response
     puts "Called #{m} with #{args.inspect}"
   end
-  def get_unscoped_token(username)
-    output = `/home/#{username}/openstack.sh`
-    if $?.success?
-            os_token = output.strip
-    else
-            raise "Error executing aa OpenStack CLI: #{output}"
-    end
-    os_token
+  def get_os_app_credentials(username, project_id)
+    credentials_file = File.read("/home/#{username}/application_credentials.json")
+    credentials = JSON.parse(credentials_file)
+    # raise "debug: #{credentials[0]["project_id"]}"
+    credentials.find { |cred| cred["project_id"] == project_id }
   end
-  def get_rich_parameters(os_token, coder_parameters)
+  def get_rich_parameters(coder_parameters, project_id, os_app_credentials)
     rich_parameter_values = [
-    { name: "token", value: os_token }
+      { name: "application_credential_name", value: os_app_credentials["name"] },
+      { name: "application_credential_id", value: os_app_credentials["id"] },
+      { name: "application_credential_secret", value: os_app_credentials["secret"] },
+      {name: "project_id", value: project_id }
     ]
-    coder_parameters.each do |key, value| 
-      rich_parameter_values << { name: key, value: value }
+    if coder_parameters
+      coder_parameters.each do |key, value|
+        rich_parameter_values << { name: key, value: value.to_s}
+      end
     end
     rich_parameter_values
   end
@@ -40,16 +43,16 @@ class OodCore::Job::Adapters::Coder::Batch
     }
   end
 
-  def submit(workspace_name, template_id, template_version_name, oidc_access_token, org_id, coder_parameters)
+  def submit(workspace_name, template_id, template_version_name, oidc_access_token, org_id, project_id, coder_parameters)
     endpoint = "https://#{@host}/api/v2/organizations/#{org_id}/members/#{username}/workspaces"
-    os_token = get_unscoped_token(username)
-    rich_parameter_values = get_rich_parameters(os_token, coder_parameters)
+    os_app_credentials = get_os_app_credentials(username, project_id)
+    rich_parameter_values = get_rich_parameters(coder_parameters, project_id, os_app_credentials)
     headers = get_headers(@token)
     body = {
       template_id: template_id,
       template_version_name: template_version_name,
       name: "#{username}-#{workspace_name}-#{rand(2_821_109_907_456).to_s(36)}",
-      rich_parameter_values: rich_parameter_values
+      rich_parameter_values: rich_parameter_values,
     }
 
     resp = api_call('post', endpoint, headers, body)
@@ -79,28 +82,48 @@ class OodCore::Job::Adapters::Coder::Batch
       "running"
     when "deleted"
       "completed"
+    when "stopped"
+      "completed"
     else
       "undetermined"
     end
   end
   def build_coder_job_info(json_data, status)
-    floating_ip=json_data["latest_build"]["resources"]
-    &.find { |resource| resource["type"] == "openstack_networking_floatingip_associate_v2" }
+    coder_output_metadata = json_data["latest_build"]["resources"]
+    &.find { |resource| resource["name"] == "coder_output" }
     &.dig("metadata")
-    &.find { |meta| meta["key"] == "floating_ip" }
-    &.dig("value") || "no floating ip"
+    coder_output_hash = coder_output_metadata&.map { |meta| [meta["key"].to_sym, meta["value"]] }&.to_h || {}
     OodCore::Job::Adapters::Coder::CoderJobInfo.new(**{
       id: json_data["id"],
       job_name: json_data["workspace_name"],
       status: OodCore::Job::Status.new(state: status),
       job_owner: json_data["workspace_owner_name"],
       submission_time: json_data["created_at"],
-      dispatch_time: 0,
-      wallclock_time: 0,
-      ood_connection_info: { host: floating_ip, port: 80 },
-      native: floating_ip
+      dispatch_time: json_data.dig("updated_at"),
+      wallclock_time: wallclock_time(json_data, status),
+      ood_connection_info: { host: coder_output_hash[:floating_ip], port: 80 },
+      native: coder_output_hash
   })
   end
+  def wallclock_time(json_data, status)
+    start_time = start_time(json_data) 
+    end_time = end_time(json_data, status)
+    end_time - start_time
+  end  
+  def start_time(json_data)
+    start_time_string = json_data.dig("updated_at")
+    DateTime.parse(start_time_string).to_time.to_i
+  end  
+  def end_time(json_data, status)
+    if status == 'deleted'
+      end_time_string = json_data["latest_build"].dig("updated_at") 
+      et = DateTime.parse(end_time_string).to_time.to_i
+    else
+      et = DateTime.now.to_time.to_i
+    end
+    et
+  end
+
   def workspace_info_from_json(json_data)
     state = json_data.dig("latest_build", "status") || json_data.dig("latest_build", "job", "status")
     status = coder_state_to_ood_status(state)
@@ -130,7 +153,7 @@ class OodCore::Job::Adapters::Coder::Batch
     when Net::HTTPSuccess
       JSON.parse(response.body)
     else
-      raise "HTTP Error: #{response.code} #{response.message}  for request #{endpoint} and body #{body}"
+      raise Error, "HTTP Error: #{response.code} #{response.message}  for request #{endpoint} and body #{body}"
     end
   end
   def username

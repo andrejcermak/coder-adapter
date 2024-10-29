@@ -64,8 +64,11 @@ module OodCore
           template_version_name = script.native[:template_version_name]
           oidc_access_token = script.native[:oidc_access_token]
           org_id = script.native[:org_id]
+          project_id = script.native[:project_id]
           coder_parameters = script.native[:coder_parameters]
-          batch.submit(workspace_name, template_id, template_version_name, oidc_access_token, org_id, coder_parameters)        # rescue Batch::Error => e
+          batch.submit(workspace_name, template_id, template_version_name, oidc_access_token, org_id, project_id, coder_parameters)        # rescue Batch::Error => e
+        rescue Batch::Error => e
+          raise JobAdapterError, e.message
         end
 
 
@@ -83,8 +86,8 @@ module OodCore
         def info_all(attrs: nil)
         # TODO - implement info all for namespaces?
           batch.method_missing(attrs: attrs)
-        #rescue Batch::Error => e
-        #  raise JobAdapterError, e.message
+        rescue Batch::Error => e
+          raise JobAdapterError, e.message
         end
 
         # Retrieve info for all jobs for a given owner or owners from the
@@ -159,8 +162,8 @@ module OodCore
         def info(id)
         # TODO - implement info for deployment
           batch.info(id.to_s)
-        #rescue Batch::Error => e
-        #  raise JobAdapterError, e.message
+        rescue Batch::Error => e
+          raise JobAdapterError, e.message
         end
 
         # Retrieve job status from resource manager
@@ -196,10 +199,9 @@ module OodCore
         # @param id [#to_s] the id of the job
         # @return [void]
         def delete(id)
-        # TODO - implement delete for deployment
           res = batch.delete(id)
-        #rescue Batch::Error => e
-        #  raise JobAdapterError, e.message
+        rescue Batch::Error => e
+          raise JobAdapterError, e.message
         end
       end
     end
